@@ -190,7 +190,7 @@ export function parseCommand(text) {
 const AGENT_ENV_KEYS = [
   'PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'TZ', 'USER', 'SHELL',
   'PLAYWRIGHT_BROWSERS_PATH', 'IS_SANDBOX', 'NODE_OPTIONS', 'XDG_CONFIG_HOME',
-  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN',
 ];
 
 export function agentEnv(source = process.env, extra = {}) {
