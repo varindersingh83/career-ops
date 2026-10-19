@@ -34,7 +34,7 @@ When a step fails, the loop:
 | Claude | Your Pro/Max plan via `CLAUDE_CODE_OAUTH_TOKEN` (no extra cost, but subject to plan limits), or API tokens at roughly $0.30–1.00 per evaluation |
 | Telegram, healthchecks.io | free |
 
-Token spend is bounded by `LOOP_MAX_EVALS_PER_CYCLE` × cycles in your active hours, and preparing stops at `LOOP_DAILY_CAP`. A cycle with nothing new pending costs one short agent call.
+Token spend is bounded by `LOOP_DAILY_EVAL_CAP` (evaluations per day) and `LOOP_DAILY_CAP` (applications prepared per day). A cycle with nothing pending in `data/pipeline.md` makes no agent call at all.
 
 ## Setup (≈20 minutes)
 
@@ -111,6 +111,7 @@ The bot only obeys `TELEGRAM_CHAT_ID` and ignores every other chat. Every evenin
 | `LOOP_SCAN_EVERY_HOURS` | 6 | How often to run `scan.mjs` |
 | `LOOP_MAX_EVALS_PER_CYCLE` | 2 | Full evaluations allowed per cycle while looking for one good role |
 | `LOOP_DAILY_CAP` | 8 | Applications prepared per day, max |
+| `LOOP_DAILY_EVAL_CAP` | 16 | Full evaluations per day, max. Counts evaluations, including ones below the score gate |
 | `LOOP_SCORE_GATE` | 4.0 | Minimum score to prepare an application |
 | `LOOP_ACTIVE_HOURS` | (always) | e.g. `7-23` in `TZ`; `22-6` wraps midnight |
 | `LOOP_SUMMARY_HOUR` | 20 | Local hour for the daily summary |

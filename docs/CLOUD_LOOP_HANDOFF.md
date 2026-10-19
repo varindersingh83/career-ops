@@ -320,6 +320,9 @@ Commands were run in the session container (Node 22, after `npm install`):
 
 ## 8. Known issues, risks and TODOs (prioritized)
 
+> **Status (branch `loop-hardening`, local commit on top of `7eeb9a7`):** §8.1–§8.6 are implemented and tested. Details under "Resolved" at the end of this section. The items below are kept as the original analysis; read "Resolved" first.
+
+
 Fix §8.1-§8.4 before turning this on for real.
 
 ### 8.1 SECURITY: agent subprocesses inherit all secrets
@@ -425,3 +428,17 @@ node test-all.mjs --quick
 docker build -f scripts/loop/Dockerfile -t career-ops-loop .
 docker run --rm -e CAREER_OPS_DATA_DIR=/data/career-ops -v $PWD/.loopdata:/data career-ops-loop node scripts/loop/worker.mjs --once
 ```
+
+### Resolved on branch `loop-hardening`
+
+- **§8.1 (done):** `agentEnv()` in `scripts/loop/lib.mjs` is an allowlist. `runStep(..., {isolated:true})` in `worker.mjs` is used for `claude`, `doctor.mjs` and `scan.mjs`. It passes only the allowlist plus `CAREER_OPS_DATA_DIR`. Verified end to end: a fake agent saw none of `GITHUB_TOKEN` or `TELEGRAM_BOT_TOKEN`. **Still open:** the agent still runs with `--dangerously-skip-permissions` (default `LOOP_CLAUDE_ARGS`). Switching to an explicit `--allowedTools` list is the remaining step; it was not done because the flag syntax was not verified against the pinned CLI.
+- **§8.2 (done):** `parsePrepareResult()` reads the last JSON line. The result goes into `runs.jsonl` as `prepare`, and `state.evaluated` counts it. Ready ids without a file on disk are logged (`missingReadyFiles`). Output with no result line is recorded as an error.
+- **§8.3 (done):** `backupData()` is wrapped in `dataLock` (`createLock()`), so a Telegram ✅ and a cycle can't run git in the data repo at the same time.
+- **§8.4 (partly done):** `CLAUDE_CODE_VERSION` is pinned to `2.1.289` (released 2026-10-03, at least 14 days old when pinned). **Not verified:** that `--dangerously-skip-permissions` works as root with `IS_SANDBOX=1` in the real container. Check this on the first Railway build; if it fails, switch to a non-root user (the Playwright image has `pwuser`).
+- **§8.5 (done):** `LOOP_DAILY_EVAL_CAP` (default 16) is enforced per cycle by capping `MAX_EVALS` to the remaining budget. If `data/pipeline.md` has no `- [ ] ` lines, the prepare step is skipped and no agent call is made (`run.skippedPrepare` says why).
+- **§8.6 (done):** `GET /health` returns 503 when the last successful cycle is more than 3 × `LOOP_INTERVAL_MIN` old. It returns 200 when paused or outside active hours, and 404 for other paths. The body is just `{ok, reason}`.
+
+**Bug found and fixed during testing:** the isolated environment initially dropped `CAREER_OPS_DATA_DIR` for the doctor and scan steps, so they ran against the repo instead of the data root. `runStep` now always sets it for isolated children.
+
+**Tests:** `node --test tests/cloud-loop.test.mjs` passes 15/15 (8 original, 7 new for §8.1–§8.6). End-to-end runs (fake `claude`, mock Telegram) were repeated after the changes.
+

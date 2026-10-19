@@ -24,6 +24,8 @@ import { createNotifier } from './notify.mjs';
 import {
   loadConfig, localParts, withinActiveHours, scanDue, preparedToday, classifyFailure,
   failureSignature, tail, parseReadyItem, formatReadyMessage, parseCommand,
+  agentEnv, parsePrepareResult, missingReadyFiles, pendingPipelineCount, evalsToday,
+  healthStatus, createLock,
 } from './lib.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,6 +38,8 @@ const RCA_DIR = join(LOOP_DIR, 'rca');
 const STATE_FILE = join(LOOP_DIR, 'state.json');
 const RUNS_FILE = join(LOOP_DIR, 'runs.jsonl');
 const notifier = createNotifier(config);
+const PIPELINE_FILE = join(DATA_ROOT, 'data', 'pipeline.md');
+const dataLock = createLock(); // serialises git in the data repo (handoff §8.3)
 
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 
@@ -69,14 +73,19 @@ function recentRuns(n = 8) {
 
 // ── process helpers ──────────────────────────────────────────────────────────
 
-/** Run a command with a hard timeout; never throws. */
-function runStep(cmd, args, { cwd = REPO, env = {}, timeoutMs = config.stepTimeoutMin * 60_000 } = {}) {
+/**
+ * Run a command with a hard timeout; never throws. With `isolated`, the child gets
+ * only the agentEnv() allowlist plus `env`, never the worker's secrets (handoff §8.1).
+ */
+function runStep(cmd, args, { cwd = REPO, env = {}, timeoutMs = config.stepTimeoutMin * 60_000, isolated = false } = {}) {
   return new Promise(done => {
     const started = Date.now();
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Every isolated child must still see the data root, or it silently reads the repo instead.
+    const childEnv = isolated ? agentEnv(process.env, { CAREER_OPS_DATA_DIR: DATA_ROOT, ...env }) : { ...process.env, ...env };
+    const child = spawn(cmd, args, { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     const cap = s => (s.length > 200_000 ? s.slice(-200_000) : s);
     child.stdout.on('data', d => { stdout = cap(stdout + d); });
     child.stderr.on('data', d => { stderr = cap(stderr + d); });
@@ -98,7 +107,7 @@ function claude(prompt, { args = config.claudeArgs, cwd = REPO, env = {}, timeou
   const full = [...args];
   if (config.model) full.push('--model', config.model);
   full.push('-p', prompt, '--output-format', 'text');
-  return runStep(config.claudeBin, full, { cwd, env: { CAREER_OPS_DATA_DIR: DATA_ROOT, ...env }, timeoutMs });
+  return runStep(config.claudeBin, full, { cwd, env: { CAREER_OPS_DATA_DIR: DATA_ROOT, ...env }, timeoutMs, isolated: true });
 }
 
 function fill(template, vars) {
@@ -133,7 +142,7 @@ async function bootstrapData() {
   }
 }
 
-async function backupData() {
+async function backupDataUnlocked() {
   if (!config.github.dataRepo || !existsSync(join(DATA_ROOT, '.git'))) return;
   await git(DATA_ROOT, 'add', '-A');
   const diff = await git(DATA_ROOT, 'diff', '--cached', '--quiet');
@@ -142,6 +151,9 @@ async function backupData() {
   const push = await git(DATA_ROOT, 'push', '-q', 'origin', 'HEAD');
   if (push.code !== 0) log(`[data] backup push failed: ${tail(push.stderr, 3)}`);
 }
+
+/** Commit and push the data repo. Runs under dataLock so two writers can't collide on .git/index.lock. */
+const backupData = () => dataLock(backupDataUnlocked);
 
 // ── cycle ────────────────────────────────────────────────────────────────────
 
@@ -169,11 +181,25 @@ async function cycle(trigger = 'schedule') {
     if (state.paused && trigger === 'schedule') return { skipped: 'paused' };
     if (trigger === 'schedule' && !withinActiveHours(config.activeHours, hour)) return { skipped: 'outside active hours' };
     if (preparedToday(state, day) >= config.dailyCap) return { skipped: `daily cap ${config.dailyCap} reached` };
+    if (evalsToday(state, day) >= config.dailyEvalCap) return { skipped: `daily evaluation cap ${config.dailyEvalCap} reached` };
 
     const steps = [
-      { name: 'doctor', when: () => true, run: () => runStep('node', ['doctor.mjs', '--json'], { timeoutMs: 60_000 }), check: doctorReady },
-      { name: 'scan', when: () => scanDue(state.lastScanAt, now, config.scanEveryHours), run: () => runStep('node', ['scan.mjs']), after: () => { state.lastScanAt = now.toISOString(); } },
-      { name: 'prepare', when: () => true, run: () => claude(fill(prompt('prepare'), { DATA_ROOT, READY_DIR, MAX_EVALS: config.maxEvalsPerCycle, SCORE_GATE: config.scoreGate.toFixed(1) })) },
+      { name: 'doctor', when: () => true, run: () => runStep('node', ['doctor.mjs', '--json'], { timeoutMs: 60_000, isolated: true }), check: doctorReady },
+      { name: 'scan', when: () => scanDue(state.lastScanAt, now, config.scanEveryHours), run: () => runStep('node', ['scan.mjs'], { isolated: true }), after: () => { state.lastScanAt = now.toISOString(); } },
+      {
+        name: 'prepare',
+        // No agent call when nothing is pending: it would only spend tokens to say so (handoff §8.5).
+        when: () => {
+          const pending = existsSync(PIPELINE_FILE) ? pendingPipelineCount(readFileSync(PIPELINE_FILE, 'utf-8')) : 0;
+          if (pending === 0) run.skippedPrepare = 'no pending entries in data/pipeline.md';
+          return pending > 0;
+        },
+        run: () => claude(fill(prompt('prepare'), {
+          DATA_ROOT, READY_DIR,
+          MAX_EVALS: Math.min(config.maxEvalsPerCycle, Math.max(1, config.dailyEvalCap - evalsToday(state, day))),
+          SCORE_GATE: config.scoreGate.toFixed(1),
+        })),
+      },
     ];
 
     for (const step of steps) {
@@ -188,11 +214,25 @@ async function cycle(trigger = 'schedule') {
         return run;
       }
       step.after?.();
-      if (step.name === 'prepare') run.summary = tail(result.stdout.trim(), 1).slice(0, 500);
+      if (step.name === 'prepare') {
+        const parsed = parsePrepareResult(result.stdout);
+        run.prepare = parsed ?? { error: 'prepare run did not end with a result JSON line' };
+        run.summary = tail(result.stdout.trim(), 1).slice(0, 500);
+        if (parsed) {
+          state.evaluated = { day, count: evalsToday(state, day) + parsed.evaluated };
+          const onDisk = new Set(readyItems().map(i => i.report));
+          const missing = missingReadyFiles(parsed.ready, onDisk);
+          if (missing.length) log(`[warn] prepare listed ready ${missing.join(', ')} with no valid ready file`);
+          if (parsed.errors.length) log(`[warn] prepare reported errors: ${parsed.errors.join(' | ')}`);
+        } else {
+          log('[warn] prepare output had no result line; evaluation count not updated');
+        }
+      }
     }
 
     run.ready = await deliverReady(day);
     state.consecutiveFailures = 0;
+    state.lastSuccessAt = now.toISOString();
     if (config.healthcheckPingUrl) fetch(config.healthcheckPingUrl, { signal: AbortSignal.timeout(10_000) }).catch(() => {});
     return run;
   } catch (err) {
@@ -412,15 +452,21 @@ async function maybeDailySummary() {
 function startHealthServer() {
   if (!config.port) return;
   createServer((req, res) => {
-    const body = JSON.stringify({ ok: true, paused: Boolean(state.paused), busy, consecutiveFailures: state.consecutiveFailures ?? 0, lastScanAt: state.lastScanAt ?? null });
-    res.writeHead(req.url === '/health' || req.url === '/' ? 200 : 404, { 'Content-Type': 'application/json' });
-    res.end(body);
+    if (req.url !== '/health' && req.url !== '/') {
+      res.writeHead(404).end();
+      return;
+    }
+    const health = healthStatus({ state, now: new Date(), intervalMin: config.intervalMin, activeHours: config.activeHours, timezone: config.timezone });
+    // Public details stay minimal: no paths, counts or tokens (handoff §5.8).
+    res.writeHead(health.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: health.ok, reason: health.reason }));
   }).listen(config.port, '0.0.0.0', () => log(`[health] listening on :${config.port}`));
 }
 
 async function main() {
   await bootstrapData();
   state = loadState();
+  state.startedAt = new Date().toISOString();
   if (!notifier.interactive && !(config.alertRelay.url && config.alertRelay.apiKey)) log('[loop] WARNING: no Telegram bot or alert relay configured; ready items stay queued until one is.');
   log(`[loop] data root ${DATA_ROOT} · every ${config.intervalMin} min · gate ${config.scoreGate} · cap ${config.dailyCap}/day`);
 

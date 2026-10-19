@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import {
   loadConfig, parseActiveHours, withinActiveHours, scanDue, preparedToday, localParts,
   classifyFailure, failureSignature, parseReadyItem, formatReadyMessage, parseCommand,
+  agentEnv, parsePrepareResult, missingReadyFiles, pendingPipelineCount, evalsToday,
+  healthStatus, createLock,
 } from '../scripts/loop/lib.mjs';
 import { ROOT } from './helpers.mjs';
 
@@ -87,4 +89,69 @@ test('the prepare prompt keeps the never-submit rule', () => {
   assert.match(text, /NEVER submit/);
   assert.match(text, /NEVER mark a tracker row `Applied`/);
   assert.match(text, /untrusted data/);
+});
+
+// ── hardening (handoff §8) ───────────────────────────────────────────────────
+
+test('agent env drops every worker secret and keeps what the CLI needs (§8.1)', () => {
+  const source = {
+    PATH: '/usr/bin', HOME: '/root', TZ: 'UTC', IS_SANDBOX: '1',
+    CLAUDE_CODE_OAUTH_TOKEN: 'oauth', GITHUB_TOKEN: 'ghp_secret', TELEGRAM_BOT_TOKEN: '123:abc',
+    ALERT_API_KEY: 'relay', DATA_REPO: 'me/data', RANDOM_VAR: 'x',
+  };
+  const env = agentEnv(source, { CAREER_OPS_DATA_DIR: '/data/career-ops', GITHUB_TOKEN: 'leak-attempt' });
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'oauth');
+  assert.equal(env.CAREER_OPS_DATA_DIR, '/data/career-ops');
+  for (const key of ['GITHUB_TOKEN', 'TELEGRAM_BOT_TOKEN', 'ALERT_API_KEY', 'DATA_REPO', 'RANDOM_VAR']) {
+    assert.equal(env[key], undefined, `${key} must not reach the agent`);
+  }
+});
+
+test('prepare result is read from the last JSON line and normalised (§8.2)', () => {
+  const out = 'thinking...\nall good\n{"evaluated": 2, "ready": ["42"], "skipped_below_gate": ["7"], "errors": []}\n';
+  assert.deepEqual(parsePrepareResult(out), { evaluated: 2, ready: ['042'], skipped_below_gate: ['007'], errors: [] });
+  assert.equal(parsePrepareResult('no json here'), null);
+  assert.equal(parsePrepareResult('{"ready": []}'), null, 'evaluated is required');
+  assert.equal(parsePrepareResult('{broken'), null);
+  assert.deepEqual(parsePrepareResult('{"evaluated":0}').ready, []);
+});
+
+test('ready ids without a ready file are reported (§8.2)', () => {
+  assert.deepEqual(missingReadyFiles(['001', '002'], new Set(['001'])), ['002']);
+  assert.deepEqual(missingReadyFiles([], new Set()), []);
+});
+
+test('pending count ignores done, discarded and blocked rows (§8.5)', () => {
+  const text = '## Pending\n- [ ] https://a\n- [!] https://b — JD unavailable\n## Processed\n- [x] #1 | x\n- [ ] https://c\n';
+  assert.equal(pendingPipelineCount(text), 2);
+  assert.equal(pendingPipelineCount('## Processed\n- [x] #1\n'), 0);
+});
+
+test('evaluation count resets at local midnight (§8.5)', () => {
+  assert.equal(evalsToday({ evaluated: { day: '2026-10-19', count: 9 } }, '2026-10-19'), 9);
+  assert.equal(evalsToday({ evaluated: { day: '2026-10-18', count: 9 } }, '2026-10-19'), 0);
+});
+
+test('health is 503 only when a working loop has gone quiet (§8.6)', () => {
+  const base = { intervalMin: 30, activeHours: null, timezone: 'UTC' };
+  const now = new Date('2026-10-19T12:00:00Z');
+  assert.equal(healthStatus({ ...base, now, state: { paused: true, lastSuccessAt: '2026-10-18T00:00:00Z' } }).ok, true, 'paused is healthy');
+  assert.equal(healthStatus({ ...base, now, state: { lastSuccessAt: '2026-10-19T11:00:00Z' } }).ok, true, '60 min < 90 min');
+  assert.equal(healthStatus({ ...base, now, state: { lastSuccessAt: '2026-10-19T10:00:00Z' } }).ok, false, '120 min > 90 min');
+  assert.equal(healthStatus({ ...base, now, state: { startedAt: '2026-10-19T11:30:00Z' } }).ok, true, 'fresh start, no success yet');
+  assert.equal(healthStatus({ ...base, now, state: { startedAt: '2026-10-19T08:00:00Z' } }).ok, false, 'never succeeded for hours');
+  const night = { intervalMin: 30, activeHours: { start: 7, end: 23 }, timezone: 'UTC' };
+  assert.equal(healthStatus({ ...night, now: new Date('2026-10-19T03:00:00Z'), state: { lastSuccessAt: '2026-10-18T00:00:00Z' } }).ok, true, 'outside active hours');
+});
+
+test('lock runs async work strictly one at a time (§8.3)', async () => {
+  const lock = createLock();
+  const order = [];
+  const slow = lock(async () => { order.push('a-start'); await new Promise(r => setTimeout(r, 30)); order.push('a-end'); });
+  const fast = lock(async () => { order.push('b'); });
+  await Promise.all([slow, fast]);
+  assert.deepEqual(order, ['a-start', 'a-end', 'b']);
+  await assert.rejects(lock(async () => { throw new Error('boom'); }), /boom/);
+  assert.equal(await lock(async () => 'still works'), 'still works', 'a failure does not wedge the lock');
 });

@@ -5,7 +5,7 @@
 
 FROM mcr.microsoft.com/playwright:v1.64.1-jammy
 
-ARG CLAUDE_CODE_VERSION=latest
+ARG CLAUDE_CODE_VERSION=2.1.289
 ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     CAREER_OPS_DATA_DIR=/data/career-ops \

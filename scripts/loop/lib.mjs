@@ -28,6 +28,7 @@ export function loadConfig(env = process.env) {
     scanEveryHours: Math.max(1, int(env.LOOP_SCAN_EVERY_HOURS, 6)),
     maxEvalsPerCycle: Math.max(1, int(env.LOOP_MAX_EVALS_PER_CYCLE, 2)),
     dailyCap: Math.max(1, int(env.LOOP_DAILY_CAP, 8)),
+    dailyEvalCap: Math.max(1, int(env.LOOP_DAILY_EVAL_CAP, 16)),
     scoreGate: float(env.LOOP_SCORE_GATE, 4.0),
     activeHours: parseActiveHours(env.LOOP_ACTIVE_HOURS),
     timezone: env.TZ?.trim() || 'UTC',
@@ -177,4 +178,92 @@ export function parseCommand(text) {
   const m = /^\/?(\w+)(?:@\w+)?(?:[\s:]+(\S+))?/.exec(String(text ?? '').trim());
   if (!m) return null;
   return { name: m[1].toLowerCase(), arg: m[2] ?? '' };
+}
+
+// ── hardening helpers (handoff §8.1–§8.6) ───────────────────────────────────
+
+/**
+ * Only these variables reach an agent subprocess. Job postings are untrusted, and
+ * the agent runs with broad tool access, so the worker's own secrets (GitHub,
+ * Telegram, the alert relay) must never be in its environment.
+ */
+const AGENT_ENV_KEYS = [
+  'PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'TZ', 'USER', 'SHELL',
+  'PLAYWRIGHT_BROWSERS_PATH', 'IS_SANDBOX', 'NODE_OPTIONS', 'XDG_CONFIG_HOME',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY',
+];
+
+export function agentEnv(source = process.env, extra = {}) {
+  const out = {};
+  for (const key of AGENT_ENV_KEYS) {
+    if (source[key] !== undefined && source[key] !== '') out[key] = source[key];
+  }
+  for (const [key, value] of Object.entries(extra)) {
+    if (AGENT_ENV_KEYS.includes(key) || key === 'CAREER_OPS_DATA_DIR') out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * The prepare run must end with one JSON line: {evaluated, ready, skipped_below_gate, errors}.
+ * Returns null when no such line exists, so the caller can flag it rather than trust it.
+ */
+export function parsePrepareResult(stdout) {
+  const lines = String(stdout ?? '').trim().split('\n').map(l => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].startsWith('{')) continue;
+    let obj;
+    try { obj = JSON.parse(lines[i]); } catch { return null; }
+    if (typeof obj.evaluated !== 'number') return null;
+    const list = v => (Array.isArray(v) ? v.map(x => String(x).replace(/\D/g, '').padStart(3, '0')).filter(x => x !== '000') : []);
+    return {
+      evaluated: obj.evaluated,
+      ready: list(obj.ready),
+      skipped_below_gate: list(obj.skipped_below_gate),
+      errors: Array.isArray(obj.errors) ? obj.errors.map(String) : [],
+    };
+  }
+  return null;
+}
+
+/** Ready ids that have no matching, valid ready/NNN.json on disk. */
+export function missingReadyFiles(ready, readyItemsById) {
+  return ready.filter(id => !readyItemsById.has(id));
+}
+
+/** Count of unchecked `- [ ]` lines in the pipeline. `[!]` and `[x]` rows don't count. */
+export function pendingPipelineCount(text) {
+  return String(text ?? '').split('\n').filter(l => /^- \[ \] /.test(l)).length;
+}
+
+export function evalsToday(state, day) {
+  return state.evaluated?.day === day ? state.evaluated.count : 0;
+}
+
+/**
+ * Health for /health. 503 only when the loop should be working and has not
+ * completed a cycle within 3 intervals. Paused, or outside active hours, is healthy.
+ */
+export function healthStatus({ state, now, intervalMin, activeHours, timezone }) {
+  const { hour } = localParts(now, timezone);
+  if (state.paused) return { ok: true, reason: 'paused' };
+  if (!withinActiveHours(activeHours, hour)) return { ok: true, reason: 'outside active hours' };
+  const limitMin = 3 * intervalMin;
+  // Measure from the last success, or from process start when there has been none yet.
+  const since = Date.parse(state.lastSuccessAt ?? '') || Date.parse(state.startedAt ?? '');
+  if (!Number.isFinite(since)) return { ok: true, reason: 'no reference time yet' };
+  const ageMin = (now.getTime() - since) / 60_000;
+  return ageMin <= limitMin
+    ? { ok: true, reason: 'recent cycle' }
+    : { ok: false, reason: `no successful cycle for ${Math.round(ageMin)} min (limit ${limitMin})` };
+}
+
+/** Serialises async work. Used so a Telegram ✅ and a cycle never run git in the data repo at once. */
+export function createLock() {
+  let tail = Promise.resolve();
+  return fn => {
+    const run = tail.then(fn, fn);
+    tail = run.catch(() => {});
+    return run;
+  };
 }
