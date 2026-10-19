@@ -26,6 +26,7 @@ export function loadConfig(env = process.env) {
   return {
     intervalMin: Math.max(5, int(env.LOOP_INTERVAL_MIN, 30)),
     scanEveryHours: Math.max(1, int(env.LOOP_SCAN_EVERY_HOURS, 6)),
+    scanHour: Math.min(23, Math.max(0, int(env.LOOP_SCAN_HOUR, 19))),
     maxEvalsPerCycle: Math.max(1, int(env.LOOP_MAX_EVALS_PER_CYCLE, 2)),
     dailyCap: Math.max(1, int(env.LOOP_DAILY_CAP, 8)),
     dailyEvalCap: Math.max(1, int(env.LOOP_DAILY_EVAL_CAP, 16)),

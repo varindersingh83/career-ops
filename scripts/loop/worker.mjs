@@ -185,7 +185,7 @@ async function cycle(trigger = 'schedule') {
 
     const steps = [
       { name: 'doctor', when: () => true, run: () => runStep('node', ['doctor.mjs', '--json'], { timeoutMs: 60_000, isolated: true }), check: doctorReady },
-      { name: 'scan', when: () => scanDue(state.lastScanAt, now, config.scanEveryHours), run: () => runStep('node', ['scan.mjs'], { isolated: true }), after: () => { state.lastScanAt = now.toISOString(); } },
+      { name: 'scan', when: () => scanDue(state.lastScanAt, now, config.scanEveryHours) && localParts(now, config.timezone).hour >= config.scanHour, run: () => runStep('node', ['scan.mjs', '--since', '3'], { isolated: true }), after: () => { state.lastScanAt = now.toISOString(); } },
       {
         name: 'prepare',
         // No agent call when nothing is pending: it would only spend tokens to say so (handoff §8.5).
