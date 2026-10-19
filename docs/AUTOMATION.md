@@ -336,3 +336,6 @@ silently discarding the evaluation itself.
   separate and stack on top.
 - **Nothing new to install.** `node scan.mjs` already ships; the triage is a prompt,
   not a dependency.
+- **Want it running 24/7 in the cloud?** [CLOUD_LOOP.md](CLOUD_LOOP.md) runs scan →
+  evaluate → prepare on Railway every 30 minutes and hands each ready application
+  to you on Telegram to submit, with RCA alerts and opt-in autofix PRs on failure.

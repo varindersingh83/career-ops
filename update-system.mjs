@@ -327,6 +327,7 @@ const SYSTEM_PATHS = [
   'scripts/check-syntax.mjs',
   'scripts/export-ats-text.mjs',
   'scripts/followup-sweep.sh',
+  'scripts/loop/',
   'scripts/ui-server.mjs',
   'story-provenance-check.mjs',
   'lib/latex-content.mjs',
