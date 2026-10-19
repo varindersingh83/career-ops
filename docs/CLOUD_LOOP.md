@@ -132,4 +132,5 @@ The bot only obeys `TELEGRAM_CHAT_ID` and ignores every other chat. Every evenin
 
 - **LinkedIn** postings are skipped. They need a logged-in browser, and the loop keeps them `[!]` in `pipeline.md` per the LinkedIn guard in AGENTS.md. Evaluate those locally.
 - **Form questions** are read from the ATS page or API (Greenhouse, Ashby, Lever via `prepare-application.mjs`). For other ATSs the answers cover the usual questions, and you may meet an extra field or two when you open the form.
+- **Maintainers / next agent:** design notes, decisions, known issues and the TODO checklist are in [CLOUD_LOOP_HANDOFF.md](CLOUD_LOOP_HANDOFF.md).
 - **Run it locally:** `node scripts/loop/worker.mjs --once` runs one cycle against your data root and exits non-zero on failure.
